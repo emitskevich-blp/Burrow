@@ -10,6 +10,7 @@
 package evaluator
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -225,7 +226,7 @@ func (module *CachingEvaluator) evaluateConsumerStatus(clusterAndConsumer string
 	completePartitions := 0
 	for topic, partitions := range topics {
 		for partitionID, partition := range partitions {
-			partitionStatus := evaluatePartitionStatus(partition, module.minimumComplete, module.allowedLag)
+			partitionStatus := module.evaluatePartitionStatus(cluster, consumer, partitionID, partition, module.minimumComplete, module.allowedLag)
 			partitionStatus.Topic = topic
 			partitionStatus.Partition = int32(partitionID)
 			partitionStatus.Owner = partition.Owner
@@ -258,7 +259,7 @@ func (module *CachingEvaluator) evaluateConsumerStatus(clusterAndConsumer string
 		status.Complete = 0
 	}
 
-	module.Log.Debug("evaluation result",
+	module.Log.Info("evaluation result",
 		zap.String("cluster", cluster),
 		zap.String("consumer", consumer),
 		zap.String("status", status.Status.String()),
@@ -269,7 +270,7 @@ func (module *CachingEvaluator) evaluateConsumerStatus(clusterAndConsumer string
 	return status, nil
 }
 
-func evaluatePartitionStatus(partition *protocol.ConsumerPartition, minimumComplete float32, allowedLag uint64) *protocol.PartitionStatus {
+func (module *CachingEvaluator) evaluatePartitionStatus(cluster string, consumer string, partitionID int, partition *protocol.ConsumerPartition, minimumComplete float32, allowedLag uint64) *protocol.PartitionStatus {
 	status := &protocol.PartitionStatus{
 		Status:     protocol.StatusOK,
 		CurrentLag: partition.CurrentLag,
@@ -307,6 +308,29 @@ func evaluatePartitionStatus(partition *protocol.ConsumerPartition, minimumCompl
 	// If the partition does not meet the completeness threshold, just return it as OK
 	if status.Complete >= minimumComplete {
 		status.Status = calculatePartitionStatus(offsets, partition.BrokerOffsets, partition.CurrentLag, time.Now().Unix(), allowedLag)
+
+		// logging of alarming offsets sequence
+		if status.Status > protocol.StatusOK {
+			count := 0
+			offsetInts := make([]int64, len(partition.Offsets))
+			for _, offset := range partition.Offsets {
+				offsetInts[count] = -1
+				if offset != nil {
+					offsetInts[count] = offset.Offset
+				}
+				count++
+			}
+			offsetsFormatted := strings.Trim(strings.Join(strings.Fields(fmt.Sprint(offsetInts)), ", "), "[]")
+
+			module.Log.Info("Alarming partition status",
+				zap.String("cluster", cluster),
+				zap.String("consumer", consumer),
+				zap.Int("partition", partitionID),
+				zap.String("status", status.Status.String()),
+				zap.String("offsets", offsetsFormatted),
+				zap.Float32("complete", status.Complete),
+			)
+		}
 	}
 
 	return status
